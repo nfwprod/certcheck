@@ -1,11 +1,13 @@
 from apistblz import downloadonce
+from apistblz import wait_and_retry
+from cryptography import x509
 import requests
 import socket
 import subprocess
 import re
 
 
-class FQDN:
+class FQDNInfo:
     def __init__(self, fqdn_str):
         self.fqdn_str = fqdn_str
         self.ip = self._check_dns(self.fqdn_str)
@@ -66,45 +68,86 @@ class FQDN:
 class CertCheck:
     def __init__(self, domain):
         self.domain = domain
-        jdata = self._get_cert(domain)
-        self.fqdns = self._extract_fqdn(jdata)
+        self.fqdninfos = self._check(domain)
 
-    @downloadonce.downloadonce('cert', is_method=True)
-    def _get_cert(self, fqdn):
+    def _check(self, domain):
+        jdata = self._get_certsummary(domain)
+        return self._check_details(jdata)
+
+    def _check_details(self, jdata):
+        fqdninfos = {}
+        for certsummary in jdata:
+            certid = certsummary.get('id', None)
+            cert = self._get_cert(certid)
+            fqdns = self._extract_cn(cert) + self._extract_dnssan(cert)
+            for fqdn in set(fqdns):
+                fqdninfos.setdefault(fqdn, FQDNInfo(fqdn))
+                fqdninfos[fqdn].add_cert(cert)
+        return fqdninfos
+
+    @downloadonce.downloadonce('certsummary', is_method=True, on_disk=True)
+    @wait_and_retry.wait_and_retry()
+    def _get_certsummary(self, domain):
         r = requests.get("https://crt.sh/"
-                "?q={}&output=json".format(fqdn))
+                "?q={}&output=json".format(domain))
+
+        if r.status_code != 200:
+            raise wait_and_retry.Retry(wait=10)
 
         jdata = r.json()
         return jdata
 
-    def _extract_fqdn(self, jdata):
-        fqdns = {}
-        for cert in jdata:
-            fqdn_str = cert.get('common_name', None)
-            fqdns.setdefault(fqdn_str, FQDN(fqdn_str))
-            fqdns[fqdn_str].add_cert(cert)
+    @downloadonce.downloadonce('cert', is_method=True)
+    def _get_cert(self, certid):
+        r = requests.get("https://crt.sh/"
+                "?d={}".format(certid))
 
-            for fqdn_str in cert.get('name_value', '').split('\n'):
-                fqdns.setdefault(fqdn_str, FQDN(fqdn_str))
-                fqdns[fqdn_str].add_cert(cert)
+        content = r.content
+        return content
 
+    def _extract_cn(self, cert):
+        try:
+            ce = x509.load_pem_x509_certificate(cert)
+            st = ce.subject
+            cns = st.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+            fqdns = [x.value for x in cns]
+        except:
+            fqdns = []
         return fqdns
+
+    def _extract_dnssan(self, cert):
+        try:
+            ce = x509.load_pem_x509_certificate(cert)
+            es = ce.extensions
+            sans = es.get_extension_for_class(x509.SubjectAlternativeName)
+            fqdns = sans.value.get_values_for_type(x509.general_name.DNSName)
+        except:
+            fqdns = []
+        return fqdns
+
+    def _rsort(self, fqdns):
+        jcandidates = [(x.split('.', x).reverse())  for x in fqds]
 
     def show(self):
         print('fqdn, IP, AS, AS Descriptions')
-        for fqdn in [x[1] for x in sorted(self.fqdns.items(), key=lambda x: x[0])]:
-            print(fqdn)
+        for fqdninfo in [x[1] for x in
+                sorted(self.fqdninfos.items(),
+                    key=lambda x: (x[0].split('.',)[::-1]))]:
+            print(fqdninfo)
 
     def show_details(self):
         print('fqdn, IP, AS, AS Descriptions, Cert ID')
-        for fqdn in [x[1] for x in sorted(self.fqdns.items(), key=lambda x: x[0])]:
-            fqdn.show_details()
+        for fqdninfo in [x[1] for x in
+                sorted(self.fqdninfos.items(),
+                    key=lambda x: (x[0].split('.')[::-1]))]:
+            fqdninfo.show_details()
+
 
 if __name__ == '__main__':
     import sys
 
     # Uncomment when you do test without access to external sites every time.
-    # downloadonce.force_on_disk = True
+    downloadonce.force_on_disk = True
 
     if len(sys.argv) != 2:
         print('usage: python3 certcheck.py example.net')
