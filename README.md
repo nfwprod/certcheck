@@ -2,7 +2,7 @@
 Search SSL information for your site and and findout all FQDNs and gather IP information from RADb.
 - SSL Information: https://crt.sh
 - IP Information: https://radb.net
-- requirements: apistblz, cryptography
+- requirements: apistblz, cryptography, tqdm
 - For Ubuntu: netbase whois
 
 Limitations
@@ -13,10 +13,18 @@ Use this script only for domains which you own.
 Usage
 -----
 ```
-$ python3 ./certcheck.py <Search Target Domain>
+$ python3 ./cert_check -h
+usage: certcheck.py [-h] [--extract_san] domain
+
+positional arguments:
+  domain         Search target domain
+
+optional arguments:
+  -h, --help     show this help message and exit
+  --extract_san  Download cert and extract SAN
 ```
 
 TODO
 ----
-Changed to extract FQDN from CN and SAN from CRT.
-For suspicisous FQDN, need intaractive interface,,,
+- Detect suspicious FQDN
+- HTML format output and easy cert check for suspicious FQDN
