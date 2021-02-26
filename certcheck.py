@@ -4,6 +4,7 @@ from cryptography import x509
 import requests
 import socket
 import subprocess
+import tqdm
 import re
 
 
@@ -21,9 +22,10 @@ class FQDNInfo:
     @downloadonce.downloadonce('dns', is_method=True)
     def _check_dns(self, fqdn_str):
         try:
-            if not fqdn_str: raise Exception()
+            if not fqdn_str:
+                raise Exception()
             ip = socket.gethostbyname(fqdn_str)
-        except:
+        except Exception as e:
             ip = None
 
         return ip
@@ -31,7 +33,8 @@ class FQDNInfo:
     @downloadonce.downloadonce('radb', is_method=True)
     def _get_radb(self, ip):
         try:
-            if not ip: raise Exception()
+            if not ip:
+                raise Exception()
             proc = subprocess.Popen(
                     ['whois', '-h', 'whois.radb.net',
                         ip],
@@ -66,30 +69,35 @@ class FQDNInfo:
 
 
 class CertCheck:
-    def __init__(self, domain):
+    def __init__(self, domain, extract_san=False):
         self.domain = domain
-        self.fqdninfos = self._check(domain)
+        self.fqdninfos = self._check(domain, extract_san)
 
-    def _check(self, domain):
-        jdata = self._get_certsummary(domain)
-        return self._check_details(jdata)
-
-    def _check_details(self, jdata):
+    def _check(self, domain, extract_san):
         fqdninfos = {}
-        for certsummary in jdata:
+        jdata = self._get_certsummary(domain)
+        for certsummary in tqdm.tqdm(jdata):
             certid = certsummary.get('id', None)
-            cert = self._get_cert(certid)
-            fqdns = self._extract_cn(cert) + self._extract_dnssan(cert)
+            if extract_san:
+                cert = self._get_cert(certid)
+                fqdns = self._extract_cn(cert) + self._extract_dnssan(cert)
+            else:
+                fqdns = []
+                cert = None
+                fqdns.append(certsummary.get('common_name', None))
+                fqdns += certsummary.get('name_value', '').split('\n')
+
             for fqdn in set(fqdns):
                 fqdninfos.setdefault(fqdn, FQDNInfo(fqdn))
                 fqdninfos[fqdn].add_cert(cert)
+
         return fqdninfos
 
     @downloadonce.downloadonce('certsummary', is_method=True, on_disk=True)
     @wait_and_retry.wait_and_retry()
     def _get_certsummary(self, domain):
         r = requests.get("https://crt.sh/"
-                "?q={}&output=json".format(domain))
+                         "?q={}&output=json".format(domain))
 
         if r.status_code != 200:
             raise wait_and_retry.Retry(wait=10)
@@ -100,7 +108,7 @@ class CertCheck:
     @downloadonce.downloadonce('cert', is_method=True)
     def _get_cert(self, certid):
         r = requests.get("https://crt.sh/"
-                "?d={}".format(certid))
+                         "?d={}".format(certid))
 
         content = r.content
         return content
@@ -111,7 +119,7 @@ class CertCheck:
             st = ce.subject
             cns = st.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
             fqdns = [x.value for x in cns]
-        except:
+        except Exception as e:
             fqdns = []
         return fqdns
 
@@ -121,42 +129,47 @@ class CertCheck:
             es = ce.extensions
             sans = es.get_extension_for_class(x509.SubjectAlternativeName)
             fqdns = sans.value.get_values_for_type(x509.general_name.DNSName)
-        except:
+        except Exception as e:
             fqdns = []
         return fqdns
 
     def _rsort(self, fqdns):
-        jcandidates = [(x.split('.', x).reverse())  for x in fqds]
+        jcandidates = [(x.split('.', x).reverse()) for x in fqds]
 
     def show(self):
         print('fqdn, IP, AS, AS Descriptions')
-        for fqdninfo in [x[1] for x in
-                sorted(self.fqdninfos.items(),
-                    key=lambda x: (x[0].split('.',)[::-1]))]:
+        fqdninfos = [x[1] for x in
+                     sorted(self.fqdninfos.items(),
+                            key=lambda x: (x[0].split('.',)[::-1]))]
+        for fqdninfo in fqdninfos:
             print(fqdninfo)
 
     def show_details(self):
         print('fqdn, IP, AS, AS Descriptions, Cert ID')
-        for fqdninfo in [x[1] for x in
-                sorted(self.fqdninfos.items(),
-                    key=lambda x: (x[0].split('.')[::-1]))]:
+        fqdninfos = [x[1] for x in
+                     sorted(self.fqdninfos.items(),
+                            key=lambda x: (x[0].split('.',)[::-1]))]
+        for fqdninfo in fqdninfos:
             fqdninfo.show_details()
 
 
 if __name__ == '__main__':
     import sys
+    import argparse
 
     # Uncomment when you do test without access to external sites every time.
     downloadonce.force_on_disk = True
 
-    if len(sys.argv) != 2:
-        print('usage: python3 certcheck.py example.net')
-        sys.exit(1)
+    # Parser
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--extract_san',
+                        action='store_true',
+                        help='Download cert and extract SAN',
+                        default=False)
+    parser.add_argument('domain',
+                        help='Search target domain')
+    args = parser.parse_args()
 
-    domain = sys.argv[1]
-    cc = CertCheck(domain)
-
+    # Run
+    cc = CertCheck(args.domain, extract_san=args.extract_san)
     cc.show()
-
-    # Uncomment for cert id
-    # cc.show_details()
